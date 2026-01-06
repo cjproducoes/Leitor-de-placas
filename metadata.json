@@ -1,0 +1,7 @@
+{
+  "name": "AutoPlate AI",
+  "description": "Leitor de placas de veículos em tempo real usando a câmera e IA Gemini.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
