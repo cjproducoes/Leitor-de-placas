@@ -60,7 +60,12 @@ export const analyzeFrame = async (base64Image: string): Promise<ScanResult> => 
       return { plates: [] };
     }
 
-  } catch (error) {
+  } catch (error: any) {
+    // Specifically handle Rate Limit (429) errors
+    if (error?.status === 429 || error?.message?.includes('429') || error?.message?.includes('quota')) {
+       throw new Error("RATE_LIMIT");
+    }
+    
     console.error("Gemini analysis error:", error);
     return { plates: [] };
   }

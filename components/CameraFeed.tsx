@@ -19,10 +19,11 @@ export const CameraFeed: React.FC<CameraFeedProps> = ({ onPlateDetected, isAutoS
   const [status, setStatus] = useState<CameraStatus>(CameraStatus.IDLE);
   const [isProcessing, setIsProcessing] = useState(false);
   const [motionScore, setMotionScore] = useState(0);
+  const [isRateLimited, setIsRateLimited] = useState(false);
 
   // Constants
   const MOTION_THRESHOLD = 15; // Sensitivity (lower = more sensitive)
-  const COOLDOWN_MS = 2500; // Minimum time between API calls (prevents 429 errors)
+  const COOLDOWN_MS = 5000; // Increased to 5s to fit within free tier limits (approx 12 RPM)
 
   // Initialize Camera
   useEffect(() => {
@@ -95,13 +96,27 @@ export const CameraFeed: React.FC<CameraFeedProps> = ({ onPlateDetected, isAutoS
              }
            });
         }
-      } catch (e) {
-        console.error("Frame analysis failed", e);
+        // If successful, ensure rate limit flag is cleared
+        if (isRateLimited) setIsRateLimited(false);
+        
+      } catch (e: any) {
+        if (e.message === "RATE_LIMIT") {
+            console.warn("Quota exceeded. Pausing scans for 15s.");
+            setIsRateLimited(true);
+            // Apply Penalty: Push the "last scan time" into the future.
+            // This tricks the motion loop into thinking we just scanned, preventing triggers.
+            lastScanTimeRef.current = Date.now() + 15000; 
+            
+            // Auto-clear visual flag after penalty
+            setTimeout(() => setIsRateLimited(false), 15000);
+        } else {
+            console.error("Frame analysis failed", e);
+        }
       }
     }
 
     setIsProcessing(false);
-  }, [status, onPlateDetected]);
+  }, [status, onPlateDetected, isRateLimited]);
 
   // Motion Detection Loop
   const checkMotionAndScan = useCallback(() => {
@@ -117,7 +132,6 @@ export const CameraFeed: React.FC<CameraFeedProps> = ({ onPlateDetected, isAutoS
       const motionCanvas = motionCanvasRef.current;
       const motionCtx = motionCanvas.getContext('2d', { willReadFrequently: true });
       
-      // Use small dimensions for performance (32x32 is enough to detect large movements like cars)
       const w = 32;
       const h = 32;
       
@@ -133,9 +147,7 @@ export const CameraFeed: React.FC<CameraFeedProps> = ({ onPlateDetected, isAutoS
           const prevData = previousFrameDataRef.current;
           let diffScore = 0;
           
-          // Simple pixel diff algorithm
           for (let i = 0; i < currentData.length; i += 4) {
-            // Compare average brightness of pixel
             const rDiff = Math.abs(currentData[i] - prevData[i]);
             const gDiff = Math.abs(currentData[i+1] - prevData[i+1]);
             const bDiff = Math.abs(currentData[i+2] - prevData[i+2]);
@@ -148,32 +160,28 @@ export const CameraFeed: React.FC<CameraFeedProps> = ({ onPlateDetected, isAutoS
           const normalizedScore = Math.min(100, Math.floor((diffScore / (w * h)) * 100));
           setMotionScore(normalizedScore);
 
-          // TRIGGER LOGIC:
-          // 1. Not currently processing
-          // 2. Cooldown period passed
-          // 3. Motion exceeds threshold OR it's been a long time (force scan every 8s)
           const now = Date.now();
+          // If we are rate limited (lastScanTime is in future), this will be negative, keeping checks false
           const timeSinceLastScan = now - lastScanTimeRef.current;
           
-          if (!isProcessing) {
+          if (!isProcessing && !isRateLimited) {
             const hasSignificantMotion = normalizedScore > MOTION_THRESHOLD;
             const cooldownPassed = timeSinceLastScan > COOLDOWN_MS;
-            const forceScan = timeSinceLastScan > 8000; // Failsafe if no motion detected
+            // Failsafe: force scan every 10s if no motion detected, provided cooldown passed
+            const forceScan = timeSinceLastScan > 10000; 
 
             if ((hasSignificantMotion && cooldownPassed) || forceScan) {
-               // Trigger!
                performAnalysis();
             }
           }
         }
         
-        // Store current frame for next comparison
         previousFrameDataRef.current = currentData;
       }
     }
 
     requestRef.current = requestAnimationFrame(checkMotionAndScan);
-  }, [isAutoScanning, isProcessing, performAnalysis]);
+  }, [isAutoScanning, isProcessing, performAnalysis, isRateLimited]);
 
   useEffect(() => {
     requestRef.current = requestAnimationFrame(checkMotionAndScan);
@@ -214,8 +222,21 @@ export const CameraFeed: React.FC<CameraFeedProps> = ({ onPlateDetected, isAutoS
 
       {status === CameraStatus.ACTIVE && (
         <>
-          <ScannerOverlay isScanning={isAutoScanning} />
+          <ScannerOverlay isScanning={isAutoScanning && !isRateLimited} />
           
+          {/* Rate Limit Overlay */}
+          {isRateLimited && (
+            <div className="absolute inset-0 flex items-center justify-center z-40 bg-black/40 backdrop-blur-sm animate-in fade-in duration-300">
+               <div className="bg-red-950/90 border border-red-500/30 px-6 py-4 rounded-xl flex flex-col items-center shadow-2xl">
+                 <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8 text-red-400 mb-2 animate-bounce" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                 </svg>
+                 <span className="font-bold text-red-100">Cota Excedida</span>
+                 <span className="text-xs text-red-300 mt-1">Aguardando 15s...</span>
+               </div>
+            </div>
+          )}
+
           {/* HUD Info */}
           <div className="absolute top-4 right-4 flex flex-col items-end gap-2 z-30">
             {isProcessing && (
